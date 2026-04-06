@@ -1,0 +1,37 @@
+function generateAndJump() {
+    // 1. 基础地址（确保结尾没有斜杠）
+    let instanceUrl = "https://你的公司.service-now.com".replace(/\/$/, "");
+    
+    // 2. 新版 UI 的固定路径
+    const navPath = "/now/nav/ui/classic/params/target/";
+
+    // 3. 准备内部页面的参数
+    const shortDesc = document.getElementById('title').value.trim();
+    let desc = document.getElementById('desc').value.trim();
+    
+    // 换行符处理 (针对新的 UI 实例)
+    desc = desc.replace(/\r?\n/g, "\r\n");
+
+    let queryParts = [];
+    queryParts.push("short_description=" + encodeURIComponent(shortDesc));
+    queryParts.push("description=" + encodeURIComponent(desc));
+    queryParts.push("assignment_group=f387adb0db9b901004f6e16c0b9619bc"); // 之前测试成功的组ID
+
+    // 4. 关键：构造内部页面的完整 URI
+    // 注意：这里内部的 & 符号可能需要手动保持为 & 或者转义，
+    // 我们先尝试最标准的写法
+    const innerPage = `incident.do?sys_id=-1&sysparm_query=${queryParts.join('^')}`;
+
+    // 5. 拼接最终 URL
+    const finalUrl = instanceUrl + navPath + encodeURIComponent(innerPage);
+
+    // 【调试技巧】如果还是不跳转，请按 F12，在控制台看打印出来的 URL 是否正确
+    console.log("即将跳转到:", finalUrl);
+
+    // 6. 执行跳转
+    if (finalUrl.length > 2000) {
+        alert("内容过长，可能会被截断，请尝试精简描述。");
+    }
+    
+    window.open(finalUrl, '_blank');
+}
