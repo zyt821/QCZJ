@@ -1,0 +1,22 @@
+function generateComplexUrl() {
+    const instanceUrl = "https://another-ui-instance.service-now.com";
+    let desc = document.getElementById('desc').value;
+
+    // 1. 规范化换行符为 CRLF (\r\n)
+    desc = desc.replace(/\r?\n/g, "\r\n");
+
+    // 2. 构造查询部分
+    // 确保每个部分都单独 encode
+    let queryParts = [];
+    queryParts.push("short_description=" + encodeURIComponent("测试标题"));
+    
+    // 针对 description，尝试使用更严格的编码
+    queryParts.push("description=" + encodeURIComponent(desc));
+
+    // 3. 拼接
+    // 注意：有些实例可能需要在末尾加 ^EQ，有些不需要
+    const finalUrl = `${instanceUrl}/incident.do?sys_id=-1&sysparm_query=${queryParts.join('^')}`;
+
+    console.log("编码后的 URL:", finalUrl);
+    window.open(finalUrl, '_blank');
+}
