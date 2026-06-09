@@ -1,0 +1,111 @@
+你的上司提了一个非常专业且符合最佳实践的要求。在生产环境（尤其是金融或企业级 intranet 系统）中，引入第三方监控软件（如 Zabbix 代理、Datadog 等）往往需要繁琐的安全审批，且可能带来不必要的 CPU/内存开销。
+RHEL 9.6 本身就自带了一套极其强大的**企业级原生监控和审计工具链**。它们直接运行在 Linux 内核层或以极其轻量级的 C 语言守护进程运行，开销通常低于 1%，且完全不需要安装任何第三方软件。
+以下是建议在 RHEL 9.6 上立刻开启的**全套原生轻量级监控方案**，它们将为你提供全方位的“历史追溯能力”。
+## 一、 指标与性能历史追溯：Performance Co-Pilot (PCP)
+**Performance Co-Pilot (PCP)** 是红帽官方在 RHEL 8/9 中极力推荐的下一代原生监控框架（用来全面替代和增强传统的 sysstat）。它专为高并发生产环境设计，其历史日志记录器（pmlogger）默认每 10 秒抓取一次全系统的精细指标，资源消耗极低。
+### 1. 安装与启用（红帽官方原生仓库）
+```bash
+sudo dnf install pcp pcp-system-tools -y
+sudo systemctl enable --now pmcd pmlogger
+
+```
+### 2. 它可以帮你查什么？
+开启后，它会把全量指标保存到 /var/log/pcp/pmlogger/ 下。下一次再发生故障，你可以在任意时间使用以下原生命令进行全盘复盘：
+ * **查网络/TCP 丢包历史**：pmrep -a 20260606.09:00 -A 20260606.12:00 network.tcp.errors
+ * **查系统负载/CPU 暴增历史**：pmrep -a 20260606.09:00 kernel.all.load
+ * **图形化查看**：如果你开启了 RHEL 自带的网页控制台（Cockpit），安装 cockpit-pcp 后，你可以直接在网页上拖动时间轴，回放过去几天内任意一秒的 CPU、内存和网络历史曲线。
+## 二、 系统级常规指标：Sysstat（全量激活）
+我们在上一次排查中发现 sar 默认没有收集高级网络指标。既然要全面防范，就应该直接把它的“全量收集”开关打开，让它作为 PCP 的后备手段。
+### 1. 修改配置开启全量指标
+打开配置文件：
+```bash
+sudo vi /etc/sysconfig/sysstat
+
+```
+将 SADC_OPTIONS 这一行修改为 -S ALL（收集包括 CPU、内存、盘、TCP/UDP/ICMP 差错、路由在内的所有内核 SNMP 计数）：
+```text
+SADC_OPTIONS="-S ALL"
+
+```
+### 2. 重启服务
+```bash
+sudo systemctl restart sysstat
+
+```
+ * **故障后排查方法**：直接使用 sar -n ETCP -f /var/log/sa/saXX 查阅任意一天的 TCP 翻车记录。
+## 三、 行为与安全审计：Linux Audit Framework (Auditd)
+auditd 是内核级别的审计系统（RHEL 9 默认已内置并启动）。它不监控性能数字，而是专门监控**“谁在什么时间，动了什么东西”**。对于排查“DR 期间网页为什么无法访问”，它能提供毁灭性的铁证。
+你可以通过配置简单的规则，让它记录特定行为，而不会给系统带来负担。
+### 1. 配置生产级微幅监控规则
+编辑 /etc/audit/rules.d/audit.rules，在文件末尾添加以下几行：
+```text
+# 1. 监控 Apache 的核心配置文件，防止有人在 DR 期间改动了配置
+-w /etc/httpd/conf/httpd.conf -p wa -k httpd_config
+
+# 2. 监控系统网络套接字绑定，看是否有其他进程抢占了 80/443 端口，或者 httpd 绑定失败
+-a always,exit -F arch=b64 -S socket -k network_monitor
+
+# 3. 监控系统时间或时区改动（DR 测试时如果服务器时区/时间不同步，会导致 SAML/SSO 认证直接失效）
+-w /etc/localtime -p wa -k time_change
+
+```
+### 2. 让规则生效
+```bash
+sudo augenrules --load
+
+```
+### 3. 故障后排查方法
+如果下次演练网页又挂了，你怀疑有人动了配置或者网络被动了，直接运行：
+```bash
+# 查看是否有 httpd 配置文件被修改的记录
+ausearch -k httpd_config -ts recent
+
+```
+## 四、 进程生死簿：Process Accounting (Psacct)
+有时候服务挂了是因为某个深夜运行的定时脚本（Crontab）或管理员误操作杀死了进程。psacct 专门负责在内核层悄悄记录所有结束运行的进程的所有细节（包括谁运行的、消耗了多少 CPU、什么时候开始、什么时候结束）。
+### 1. 安装与启用
+```bash
+sudo dnf install psacct -y
+sudo systemctl enable --now psacct
+
+```
+### 2. 它可以帮你查什么？
+如果 DR 测试期间 Apache 莫名其妙死过一次，你可以用它倒查死因：
+```bash
+# 查阅在指定时间段内，所有执行过含有 "httpd" 或 "kill" 关键字的命令
+lastcomm httpd
+lastcomm kill
+
+```
+它会清晰地告诉你，是在几点几分，哪个用户（甚至是哪个系统服务）调用了结束进程的指令。
+## 五、 防御性优化：防止 Systemd-journald 日志被截断
+RHEL 9 的默认日志管理系统是 journald。当面临 DR 测试或网络风暴时，系统可能会瞬间产生海量的错误日志。journald 默认带有**限流机制（Rate Limit）**，如果一秒内日志超过几千条，它会为了保护系统而**拒绝记录后续的日志**，这会导致关键的“爆炸现场”日志丢失。
+### 1. 调整配置，确保日志绝对完整
+修改 /etc/systemd/journald.conf：
+```bash
+sudo vi /etc/systemd/journald.conf
+
+```
+在 [Journal] 标签下修改或添加以下配置：
+```text
+[Journal]
+Storage=persistent
+RateLimitIntervalSec=0
+RateLimitBurst=0
+
+```
+> 0 代表关闭限流，不管突发产生多少万条网络报错日志，系统都会全量死磕写入硬盘，保证你事后复盘时一条不漏。
+> 
+### 2. 重启日志服务
+```bash
+sudo systemctl restart systemd-journald
+
+```
+### 📝 总结：你可以这样向老大正式汇报
+> “针对开启服务器端自主排查监控的要求，为了兼顾**‘零第三方软件引入’**和**‘生产环境低开销（<1%）’**的合规原则，我已全面激活并优化了 RHEL 9.6 的内核级监控矩阵：
+>  1. **指标层 (PCP & Sysstat)**：启用了 Performance Co-Pilot 历史日志记录与全量网路指标收集，未来可按秒回放并追溯 TCP/ICMP 的异常激增。
+>  2. **行为层 (Auditd)**：配置了内核级行为规则，重点对 Web 配置文件的篡改及网络端口绑定进行全天候审计。
+>  3. **进程层 (Psacct)**：激活了进程全周期记账，可留存系统内所有指令的调用历史。
+>  4. **日志层 (Journald)**：关闭了极端情况下的日志限流策略，确保故障期间的现场日志不被系统丢弃。
+> 目前全套原生监控已上线平稳运行，后续发生的任何系统级或网络闪断异动，我们均具备在服务器本地进行深度倒查的完整数据支撑。”
+> 
